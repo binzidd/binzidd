@@ -5,8 +5,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Only the two packages Streamlit needs (no full requirements.txt)
-RUN pip install --no-cache-dir "streamlit>=1.38.0" "requests>=2.32.0"
+# Only the packages the Streamlit frontend needs (no full requirements.txt)
+RUN pip install --no-cache-dir "streamlit>=1.38.0" "requests>=2.32.0" "bcrypt>=4.2.0"
 
 COPY frontend/streamlit_app.py ./streamlit_app.py
 
