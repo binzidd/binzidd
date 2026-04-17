@@ -41,8 +41,7 @@ from RestrictedPython import (
     safe_globals,
 )
 from RestrictedPython.Guards import (
-    guarded_getattr,
-    guarded_getitem,
+    safer_getattr,
     safe_builtins,
     guarded_iter_unpack_sequence,
 )
@@ -164,8 +163,8 @@ class SandboxExecutor:
                 "isinstance": isinstance,
             },
             # Safe attribute / item access guards required by RestrictedPython
-            "_getattr_": guarded_getattr,
-            "_getitem_": guarded_getitem,
+            "_getattr_": safer_getattr,
+            "_getitem_": lambda obj, key: obj[key],
             "_getiter_": iter,
             "_iter_unpack_sequence_": guarded_iter_unpack_sequence,
             # Expose safe modules

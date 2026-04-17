@@ -1,33 +1,30 @@
 """
-FastAPI Backend – OpenAI-Compatible API for OpenWebUI.
+FastAPI Backend – Month-End Assistant API.
 
-Exposes the Month-End Assistant through an OpenAI-compatible REST API so
-OpenWebUI (or any OpenAI-compatible client) can connect without modification.
+Exposes the Month-End Assistant through an OpenAI-compatible REST API consumed
+by the Streamlit frontend (or any OpenAI-compatible client).
 
 Endpoints
 ─────────
-  GET  /v1/models               – list available "models" (our agent types)
+  GET  /v1/models               – list available agent types
   POST /v1/chat/completions     – chat completions with SSE streaming
-  POST /v1/month-end/run        – trigger a full month-end close pipeline
+  POST /v1/month-end/run        – trigger the full month-end close pipeline
   POST /v1/month-end/approve    – submit a HITL approval decision
   GET  /v1/month-end/scenarios  – list available deep-dive scenarios
   POST /v1/month-end/scenario   – run a single named scenario
   GET  /health                  – service health check
   WS   /ws/stream/{thread_id}   – WebSocket for real-time graph events
 
-How OpenWebUI connects
-──────────────────────
-  1. Start this server:  uvicorn frontend.api.server:app --port 8000
-  2. In OpenWebUI:       Settings → Connections → Add OpenAI API
-                         URL:   http://localhost:8000/v1
-                         Key:   any-string (no auth in dev mode)
-  3. Select model:       "month-end-assistant" or "month-end-supervisor"
+Quick start
+───────────
+  uvicorn frontend.api.server:app --port 8000
+  # Then open the Streamlit UI: streamlit run frontend/streamlit_app.py
 
 Streaming
 ─────────
-  The /v1/chat/completions endpoint yields Server-Sent Events following the
-  OpenAI streaming protocol (data: {"choices":[{"delta":{"content":"…"}}]}).
-  OpenWebUI natively renders these as streaming chat bubbles.
+  /v1/chat/completions yields Server-Sent Events in the OpenAI streaming
+  protocol (data: {"choices":[{"delta":{"content":"…"}}]}).
+  The Streamlit frontend consumes these to render tokens in real time.
 """
 
 from __future__ import annotations
@@ -47,6 +44,7 @@ from pydantic import BaseModel, Field
 from month_end_assistant.agents.orchestrator import build_month_end_graph
 from month_end_assistant.agents.scenarios import SCENARIO_REGISTRY, run_scenario
 from month_end_assistant.agents.supervisor import MonthEndSupervisor
+from month_end_assistant.aws.agentcore import AgentCoreClient
 from month_end_assistant.callbacks import TokenStreamingCallback
 from month_end_assistant.config import get_settings
 from month_end_assistant.hitl import HITLManager
@@ -59,6 +57,20 @@ from month_end_assistant.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AgentCore singleton
+# ─────────────────────────────────────────────────────────────────────────────
+
+_agentcore: AgentCoreClient | None = None
+
+
+def _get_agentcore() -> AgentCoreClient:
+    global _agentcore
+    if _agentcore is None:
+        _agentcore = AgentCoreClient()
+    return _agentcore
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -131,17 +143,16 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Month-End Assistant API",
         description=(
-            "OpenAI-compatible REST API for the Agentic Month-End Assistant. "
-            "Connect OpenWebUI to this server to get a full AI-powered "
-            "month-end close interface."
+            "REST API for the Agentic Month-End Assistant. "
+            "Consumed by the Streamlit frontend and any OpenAI-compatible client."
         ),
         version="1.0.0",
     )
 
-    # ── CORS (required for OpenWebUI → API communication) ────────────────────
+    # ── CORS (required for Streamlit → API communication) ────────────────────
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],   # restrict to your OpenWebUI domain in production
+        allow_origins=["*"],   # restrict to your Streamlit domain in production
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -155,10 +166,7 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/models")
     async def list_models() -> Dict[str, Any]:
-        """
-        OpenAI-compatible model list.
-        OpenWebUI calls this to populate its model selector dropdown.
-        """
+        """OpenAI-compatible model list (used by the Streamlit agent selector)."""
         models = [
             {
                 "id":       "month-end-assistant",
@@ -192,16 +200,12 @@ def create_app() -> FastAPI:
     @app.post("/v1/chat/completions")
     async def chat_completions(req: ChatCompletionRequest):
         """
-        OpenAI-compatible chat completions endpoint with SSE streaming.
+        Chat completions with SSE streaming (stream=True) or JSON (stream=False).
 
-        OpenWebUI sends the conversation history here and expects either:
-          • A StreamingResponse (when stream=True) with SSE data chunks
-          • A JSON response with the full message (when stream=False)
-
-        The endpoint routes to the appropriate agent based on the model name:
-          month-end-assistant → Orchestrator pipeline
-          month-end-supervisor → Supervisor with worker agents
-          scenario-* → Named scenario runner
+        Routes by model name:
+          month-end-assistant  → LangGraph orchestrator pipeline
+          month-end-supervisor → Multi-agent supervisor
+          scenario-*           → Named deep-dive scenario
         """
         user_message = next(
             (m.content for m in reversed(req.messages) if m.role == "user"),
@@ -292,8 +296,7 @@ def create_app() -> FastAPI:
         """
         Submit a human approval decision to resume an interrupted pipeline.
 
-        Called when the user clicks Approve / Reject / Escalate in
-        OpenWebUI, Teams, or Slack.
+        Called from the Streamlit HITL panel, Teams, or Slack.
         """
         response = HITLResponse(
             request_id=req.request_id,
@@ -356,9 +359,8 @@ def create_app() -> FastAPI:
         """
         WebSocket endpoint for real-time pipeline event streaming.
 
-        OpenWebUI (or a custom frontend) can connect here to receive
-        agent step events, research progress, and HITL status updates
-        as they happen – without polling.
+        Connect here to receive agent step events, research progress, and
+        HITL status updates without polling.
         """
         await websocket.accept()
         logger.info("WebSocket connected for thread_id=%s", thread_id)
@@ -424,6 +426,24 @@ async def _stream_response(
 
     # ── Route to the right agent ──────────────────────────────────────────────
     try:
+        settings = get_settings()
+        if settings.agentcore_agent_id:
+            session = await session_mgr.load_or_create(user_id, company_id)
+            session = await session_mgr.update_active_period(session, period)
+            preamble = f"[model={model}] [period={period.label}]"
+            full_input = (
+                f"{preamble} {user_message}" if user_message
+                else f"{preamble} Run month-end analysis."
+            )
+            async for chunk in _get_agentcore().stream_invoke_agent(
+                input_text=full_input,
+                session_id=session.memory_session_id,
+            ):
+                yield _sse(chunk)
+            yield _sse("", finish="stop")
+            yield "data: [DONE]\n\n"
+            return
+
         if model.startswith("scenario-"):
             scenario_name = model.removeprefix("scenario-")
             yield _sse(f"Running scenario: **{scenario_name.replace('_', ' ').title()}** for {period.label}…\n\n")
@@ -489,6 +509,20 @@ async def _build_non_streaming_reply(
 ) -> str:
     """Build a complete non-streaming reply (used when stream=False)."""
     period = MonthEndPeriod(year=year, month=month)
+
+    settings = get_settings()
+    if settings.agentcore_agent_id:
+        session = await session_mgr.load_or_create(user_id, company_id)
+        preamble = f"[model={model}] [period={period.label}]"
+        full_input = (
+            f"{preamble} {user_message}" if user_message
+            else f"{preamble} Run month-end analysis."
+        )
+        result = await _get_agentcore().invoke_agent(
+            input_text=full_input,
+            session_id=session.memory_session_id,
+        )
+        return result.completion
 
     if model.startswith("scenario-"):
         scenario_name = model.removeprefix("scenario-")

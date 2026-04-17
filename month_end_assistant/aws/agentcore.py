@@ -23,6 +23,7 @@ Reference
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -178,6 +179,67 @@ class AgentCoreClient:
                 success=False,
                 error_message=str(exc),
             )
+
+    async def stream_invoke_agent(
+        self,
+        input_text: str,
+        session_id: Optional[str] = None,
+    ) -> AsyncIterator[str]:
+        """
+        Yield text chunks streamed from AgentCore Runtime.
+
+        boto3 EventStream iteration is synchronous, so we bridge it to async
+        by running the blocking iteration in a thread executor and passing
+        chunks through an asyncio.Queue.  A ``None`` sentinel signals the end.
+
+        Args:
+            input_text: The user query or task description.
+            session_id: Conversation thread ID for AgentCore context.
+
+        Yields:
+            Text chunks decoded from the EventStream chunk events.
+        """
+        if not self._runtime_client:
+            logger.warning("Runtime client unavailable – returning stub stream.")
+            yield f"[AgentCore stub] Processed: {input_text}"
+            return
+
+        session_id = session_id or str(uuid.uuid4())
+        queue: asyncio.Queue[Optional[str]] = asyncio.Queue()
+        loop = asyncio.get_event_loop()
+
+        def _blocking_invoke() -> None:
+            """Run synchronous EventStream iteration and push chunks to queue."""
+            try:
+                response = self._runtime_client.invoke_agent(
+                    agentId=self._settings.agentcore_agent_id,
+                    agentAliasId=self._settings.agentcore_agent_alias_id,
+                    sessionId=session_id,
+                    inputText=input_text,
+                    enableTrace=False,
+                )
+                for event in response.get("completion", []):
+                    if "chunk" in event:
+                        text = event["chunk"].get("bytes", b"").decode("utf-8")
+                        if text:
+                            loop.call_soon_threadsafe(queue.put_nowait, text)
+            except (BotoCoreError, ClientError) as exc:
+                logger.error("AgentCore stream_invoke_agent failed: %s", exc)
+                loop.call_soon_threadsafe(
+                    queue.put_nowait, f"\n⚠️ AgentCore error: {exc}\n"
+                )
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)  # sentinel
+
+        # Run the blocking boto3 call in a thread so the event loop stays free
+        loop.run_in_executor(None, _blocking_invoke)
+
+        # Drain the queue until the sentinel arrives
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                break
+            yield chunk
 
     def _consume_event_stream(
         self, response: Any, session_id: str

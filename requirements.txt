@@ -3,12 +3,12 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Core LangGraph / LangChain stack ─────────────────────────────────────────
-langgraph>=0.2.50               # Graph-based agent orchestration
-langchain>=0.3.0                # LLM tooling & chains
-langchain-aws>=0.2.0            # Bedrock LLM integration
-langchain-community>=0.3.0      # Community tools + InMemoryVectorStore
-langchain-core>=0.3.0           # Core abstractions, LCEL runnables
-langchain-text-splitters>=0.3.0 # RecursiveCharacterTextSplitter for RAG
+langgraph>=0.2.50,<0.3.0        # Graph-based agent orchestration
+langchain>=0.3.0,<1.0.0         # LLM tooling & chains
+langchain-aws>=0.2.0,<1.0.0     # Bedrock LLM integration
+langchain-community>=0.3.0,<1.0.0 # Community tools + InMemoryVectorStore
+langchain-core>=0.3.0,<1.0.0    # Core abstractions, LCEL runnables
+langchain-text-splitters>=0.3.0,<1.0.0 # RecursiveCharacterTextSplitter for RAG
 
 # ── AWS SDK ───────────────────────────────────────────────────────────────────
 boto3>=1.35.0                   # AWS SDK (AgentCore, Bedrock, DynamoDB)
@@ -35,10 +35,14 @@ orjson>=3.10.0                  # Fast JSON
 tenacity>=9.0.0                 # Retry logic
 tabulate>=0.9.0                 # Table formatting
 
-# ── FastAPI server (OpenWebUI backend) ────────────────────────────────────────
+# ── FastAPI server ────────────────────────────────────────────────────────────
 fastapi>=0.112.0
 uvicorn[standard]>=0.30.0
 sse-starlette>=2.1.0            # SSE helpers for streaming endpoints
+
+# ── Streamlit frontend ────────────────────────────────────────────────────────
+streamlit>=1.38.0
+requests>=2.32.0
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest>=8.3.0
