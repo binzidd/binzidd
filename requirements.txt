@@ -1,0 +1,65 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Agentic Month-End Assistant – Python Dependencies
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Core LangGraph / LangChain stack ─────────────────────────────────────────
+langgraph>=0.2.50,<0.3.0        # Graph-based agent orchestration
+langchain>=0.3.0,<1.0.0         # LLM tooling & chains
+langchain-aws>=0.2.0,<1.0.0     # Bedrock LLM integration
+langchain-community>=0.3.0,<1.0.0 # Community tools + InMemoryVectorStore
+langchain-core>=0.3.0,<1.0.0    # Core abstractions, LCEL runnables
+langchain-text-splitters>=0.3.0,<1.0.0 # RecursiveCharacterTextSplitter for RAG
+
+# ── AWS SDK ───────────────────────────────────────────────────────────────────
+boto3>=1.35.0                   # AWS SDK (AgentCore, Bedrock, DynamoDB)
+botocore>=1.35.0
+
+# ── Async HTTP (Teams & Slack webhooks) ───────────────────────────────────────
+httpx[asyncio]>=0.27.0
+aiohttp>=3.10.0
+
+# ── Data validation ───────────────────────────────────────────────────────────
+pydantic>=2.8.0
+pydantic-settings>=2.5.0        # Settings from env vars
+
+# ── Sandbox / restricted execution ───────────────────────────────────────────
+RestrictedPython>=7.2           # AST-based Python sandbox
+
+# ── Pretty console output ─────────────────────────────────────────────────────
+rich>=13.8.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+python-dateutil>=2.9.0
+orjson>=3.10.0                  # Fast JSON
+tenacity>=9.0.0                 # Retry logic
+tabulate>=0.9.0                 # Table formatting
+
+# ── FastAPI server ────────────────────────────────────────────────────────────
+fastapi>=0.112.0
+uvicorn[standard]>=0.30.0
+sse-starlette>=2.1.0            # SSE helpers for streaming endpoints
+
+# ── Streamlit frontend ────────────────────────────────────────────────────────
+streamlit>=1.38.0
+requests>=2.32.0
+bcrypt>=4.2.0                   # Password hashing for Streamlit auth
+
+# ── Agent Harness: persistent checkpointing ───────────────────────────────────
+langgraph-checkpoint-sqlite>=2.0.0   # AsyncSqliteSaver for durable state
+# langgraph-checkpoint-postgres>=2.0.0 # Uncomment for team-shared Postgres backend
+
+# ── Agent Harness: observability ─────────────────────────────────────────────
+opentelemetry-api>=1.27.0
+opentelemetry-sdk>=1.27.0
+opentelemetry-exporter-otlp-proto-grpc>=1.27.0  # OTLP/gRPC export (Jaeger, Grafana Tempo)
+opentelemetry-instrumentation-fastapi>=0.48b0    # Auto-instrument FastAPI
+prometheus-client>=0.21.0           # /metrics endpoint
+structlog>=24.4.0                   # Structured JSON logging with contextvars
+
+# ── Agent Harness: evaluation ─────────────────────────────────────────────────
+langsmith>=0.1.100                  # LangSmith tracing + dataset management
+
+# ── Testing ───────────────────────────────────────────────────────────────────
+pytest>=8.3.0
+pytest-asyncio>=0.24.0

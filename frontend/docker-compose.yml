@@ -1,0 +1,112 @@
+##############################################################################
+# Month-End Assistant – Docker Compose
+#
+# Services
+# ────────
+#  backend     FastAPI server (OpenAI-compatible API)
+#              http://localhost:8000
+#              Exposes all LangGraph agents + scenarios as REST endpoints
+#
+#  openwebui   Open WebUI frontend
+#              http://localhost:3000
+#              Connects to 'backend' via OPENAI_API_BASE_URL
+#              Users select agents from the model dropdown
+#
+# Quick start
+# ───────────
+#   cp .env.example .env          # Fill in AWS, Teams, Slack credentials
+#   docker compose up --build
+#   # Open http://localhost:3000
+#   # Sign up (local account, no cloud needed)
+#   # Select "month-end-assistant" from the model picker
+#   # Start chatting!
+#
+# Upload the pipeline
+# ───────────────────
+#   Settings → Pipelines → Upload File
+#   Upload: frontend/pipelines/month_end_pipeline.py
+#   This gives access to scenario-specific sub-models in the dropdown.
+##############################################################################
+
+version: "3.9"
+
+services:
+
+  # ── FastAPI backend ─────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ..              # repo root
+      dockerfile: frontend/Dockerfile.backend
+    container_name: month-end-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../:/app               # live-reload in dev; remove in production
+    environment:
+      # AWS
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      # Bedrock
+      - BEDROCK_MODEL_ID=${BEDROCK_MODEL_ID:-anthropic.claude-3-5-sonnet-20241022-v2:0}
+      # AgentCore
+      - AGENTCORE_MEMORY_ID=${AGENTCORE_MEMORY_ID}
+      - AGENTCORE_AGENT_ID=${AGENTCORE_AGENT_ID}
+      - AGENTCORE_AGENT_ALIAS_ID=${AGENTCORE_AGENT_ALIAS_ID}
+      # HITL
+      - TEAMS_WEBHOOK_URL=${TEAMS_WEBHOOK_URL}
+      - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - SLACK_APPROVAL_CHANNEL=${SLACK_APPROVAL_CHANNEL:-#month-end-approvals}
+      # App
+      - HITL_VARIANCE_THRESHOLD_PCT=${HITL_VARIANCE_THRESHOLD_PCT:-5.0}
+      - MAX_RESEARCH_ITERATIONS=${MAX_RESEARCH_ITERATIONS:-3}
+      - SANDBOX_ENABLED=${SANDBOX_ENABLED:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - month-end-net
+
+  # ── OpenWebUI frontend ─────────────────────────────────────────────────────
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: month-end-openwebui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - openwebui-data:/app/backend/data
+    environment:
+      # Point OpenWebUI at our FastAPI backend instead of OpenAI
+      - OPENAI_API_BASE_URL=http://backend:8000/v1
+      - OPENAI_API_KEY=not-needed          # our backend ignores this
+      # Disable Ollama so the model picker shows only our agents
+      - ENABLE_OLLAMA_API=false
+      # Enable pipelines support
+      - ENABLE_OPENAI_API=true
+      # UI settings
+      - WEBUI_NAME=Month-End Assistant
+      - WEBUI_URL=http://localhost:3000
+      - DEFAULT_MODELS=month-end-assistant
+      # Admin account (change in production!)
+      - WEBUI_SECRET_KEY=change-me-in-production
+    networks:
+      - month-end-net
+
+# ── Volumes ────────────────────────────────────────────────────────────────────
+volumes:
+  openwebui-data:
+    driver: local
+
+# ── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  month-end-net:
+    driver: bridge

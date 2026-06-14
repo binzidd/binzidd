@@ -1,0 +1,483 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Month-End Assistant - ECS Fargate + ALB + IAM
+  Deploys the FastAPI backend and Streamlit frontend behind an
+  Application Load Balancer with Service Connect for internal routing.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Parameters
+# ─────────────────────────────────────────────────────────────────────────────
+Parameters:
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC to deploy into (default VPC is fine)
+
+  SubnetId1:
+    Type: AWS::EC2::Subnet::Id
+    Description: First public subnet (different AZ from SubnetId2)
+
+  SubnetId2:
+    Type: AWS::EC2::Subnet::Id
+    Description: Second public subnet (different AZ from SubnetId1)
+
+  BackendImage:
+    Type: String
+    Description: ECR image URI for the FastAPI backend
+
+  StreamlitImage:
+    Type: String
+    Description: ECR image URI for the Streamlit frontend
+
+  BedrockModelId:
+    Type: String
+    Default: "anthropic.claude-3-5-sonnet-20241022-v2:0"
+    Description: Bedrock model ID used by the backend
+
+  AwsRegion:
+    Type: String
+    Default: "us-east-1"
+    Description: AWS region for Bedrock / AgentCore calls
+
+  AgentCoreAgentId:
+    Type: String
+    Default: ""
+    Description: AgentCore Agent ID (leave blank to use local LangGraph)
+
+  AgentCoreAgentAliasId:
+    Type: String
+    Default: "TSTALIASID"
+    Description: AgentCore Agent Alias ID
+
+  AgentCoreMemoryId:
+    Type: String
+    Default: ""
+    Description: AgentCore Memory ID
+
+  TeamsWebhookUrl:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: MS Teams incoming webhook URL for HITL notifications
+
+  SlackBotToken:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Slack bot OAuth token for HITL notifications
+
+  SlackApprovalChannel:
+    Type: String
+    Default: "#month-end-approvals"
+    Description: Slack channel for approval requests
+
+  HitlVarianceThresholdPct:
+    Type: Number
+    Default: 5
+    Description: Variance threshold (%) that triggers a HITL approval request
+
+  MaxResearchIterations:
+    Type: Number
+    Default: 3
+    Description: Maximum deep-research reflection rounds
+
+  SandboxEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Enable Python sandbox for financial code execution
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Resources
+# ─────────────────────────────────────────────────────────────────────────────
+Resources:
+
+  # ── CloudWatch Log Groups ────────────────────────────────────────────────────
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/month-end-backend
+      RetentionInDays: 7
+
+  StreamlitLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/month-end-streamlit
+      RetentionInDays: 7
+
+  # ── IAM: ECS Task Execution Role ────────────────────────────────────────────
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-task-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ECRAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                Resource: "*"
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt BackendLogGroup.Arn
+                  - !GetAtt StreamlitLogGroup.Arn
+
+  # ── IAM: ECS Task Role (runtime permissions) ────────────────────────────────
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-task-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: "*"
+        - PolicyName: BedrockAgentAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-agent:*
+                  - bedrock-agentcore:*
+                Resource: "*"
+        - PolicyName: BedrockAgentRuntimeAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-agent-runtime:InvokeAgent
+                  - bedrock-agent-runtime:Retrieve
+                Resource: "*"
+
+  # ── Security Groups ──────────────────────────────────────────────────────────
+  AlbSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB - allow inbound HTTP from internet
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb-sg"
+
+  BackendSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Backend Fargate task - allow traffic from ALB and Streamlit
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref AlbSG
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref StreamlitSG
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-backend-sg"
+
+  StreamlitSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Streamlit Fargate task - allow traffic from ALB
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8501
+          ToPort: 8501
+          SourceSecurityGroupId: !Ref AlbSG
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-streamlit-sg"
+
+  # ── ECS Cluster ──────────────────────────────────────────────────────────────
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${AWS::StackName}-cluster"
+      ServiceConnectDefaults:
+        Namespace: month-end.local
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # ── ALB ──────────────────────────────────────────────────────────────────────
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${AWS::StackName}-alb"
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref SubnetId1
+        - !Ref SubnetId2
+      SecurityGroups:
+        - !Ref AlbSG
+
+  BackendTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-backend-tg"
+      Protocol: HTTP
+      Port: 8000
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  StreamlitTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${AWS::StackName}-streamlit-tg"
+      Protocol: HTTP
+      Port: 8501
+      VpcId: !Ref VpcId
+      TargetType: ip
+      HealthCheckPath: /_stcore/health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref StreamlitTG
+
+  BackendListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref Listener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values:
+            - /v1/*
+            - /health
+            - /ws/*
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTG
+
+  # ── ECS Task Definitions ─────────────────────────────────────────────────────
+  BackendTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${AWS::StackName}-backend"
+      Cpu: "1024"
+      Memory: "2048"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Ref BackendImage
+          Essential: true
+          PortMappings:
+            - Name: backend-port
+              ContainerPort: 8000
+              Protocol: tcp
+          Environment:
+            - Name: AWS_REGION
+              Value: !Ref AwsRegion
+            - Name: BEDROCK_MODEL_ID
+              Value: !Ref BedrockModelId
+            - Name: AGENTCORE_AGENT_ID
+              Value: !Ref AgentCoreAgentId
+            - Name: AGENTCORE_AGENT_ALIAS_ID
+              Value: !Ref AgentCoreAgentAliasId
+            - Name: AGENTCORE_MEMORY_ID
+              Value: !Ref AgentCoreMemoryId
+            - Name: TEAMS_WEBHOOK_URL
+              Value: !Ref TeamsWebhookUrl
+            - Name: SLACK_BOT_TOKEN
+              Value: !Ref SlackBotToken
+            - Name: SLACK_APPROVAL_CHANNEL
+              Value: !Ref SlackApprovalChannel
+            - Name: HITL_VARIANCE_THRESHOLD_PCT
+              Value: !Sub "${HitlVarianceThresholdPct}"
+            - Name: MAX_RESEARCH_ITERATIONS
+              Value: !Sub "${MaxResearchIterations}"
+            - Name: SANDBOX_ENABLED
+              Value: !Ref SandboxEnabled
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref BackendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  StreamlitTaskDef:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${AWS::StackName}-streamlit"
+      Cpu: "256"
+      Memory: "512"
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      RuntimePlatform:
+        CpuArchitecture: ARM64
+        OperatingSystemFamily: LINUX
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: streamlit
+          Image: !Ref StreamlitImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8501
+              Protocol: tcp
+          Environment:
+            - Name: BACKEND_URL
+              Value: http://backend:8000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref StreamlitLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: ecs
+
+  # ── ECS Services ─────────────────────────────────────────────────────────────
+  BackendService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - BackendListenerRule
+    Properties:
+      ServiceName: !Sub "${AWS::StackName}-backend"
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref BackendTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 120
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref SubnetId1
+            - !Ref SubnetId2
+          SecurityGroups:
+            - !Ref BackendSG
+      LoadBalancers:
+        - ContainerName: backend
+          ContainerPort: 8000
+          TargetGroupArn: !Ref BackendTG
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: month-end.local
+        Services:
+          - PortName: backend-port
+            DiscoveryName: backend
+            ClientAliases:
+              - Port: 8000
+                DnsName: backend
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+
+  StreamlitService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - Listener
+    Properties:
+      ServiceName: !Sub "${AWS::StackName}-streamlit"
+      Cluster: !Ref EcsCluster
+      TaskDefinition: !Ref StreamlitTaskDef
+      DesiredCount: 1
+      LaunchType: FARGATE
+      HealthCheckGracePeriodSeconds: 60
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref SubnetId1
+            - !Ref SubnetId2
+          SecurityGroups:
+            - !Ref StreamlitSG
+      LoadBalancers:
+        - ContainerName: streamlit
+          ContainerPort: 8501
+          TargetGroupArn: !Ref StreamlitTG
+      ServiceConnectConfiguration:
+        Enabled: true
+        Namespace: month-end.local
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Outputs
+# ─────────────────────────────────────────────────────────────────────────────
+Outputs:
+
+  AppUrl:
+    Description: Streamlit UI URL (open in browser)
+    Value: !Sub "http://${LoadBalancer.DNSName}"
+
+  BackendApiUrl:
+    Description: FastAPI backend base URL
+    Value: !Sub "http://${LoadBalancer.DNSName}/v1"
+
+  HealthCheckUrl:
+    Description: Health check endpoint
+    Value: !Sub "http://${LoadBalancer.DNSName}/health"
+
+  ECSClusterName:
+    Description: ECS Cluster name
+    Value: !Ref EcsCluster
