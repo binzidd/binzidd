@@ -67,12 +67,26 @@ Showcases ALL features across LangChain, LangGraph, and AWS AgentCore:
   │  ✅ Delegate to isolated subagents (create_react_agent per sub-task)    │
   │  ✅ Persist memory across threads (MemorySaver + AgentCore Memory)      │
   │  ✅ Declarative FilePermissions (allowed/denied paths, ext, size)       │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │  Agent Harness (kitchen sink)                                          │
+  │  ─────────────────────────────                                         │
+  │  ✅ AsyncSqliteSaver / PostgresSaver persistent checkpointing           │
+  │  ✅ LangSmith + OpenTelemetry + Prometheus observability               │
+  │  ✅ InMemoryStore cross-thread long-term memory (LangGraph Store API)  │
+  │  ✅ astream_events multi-consumer fan-out SSE streaming                 │
+  │  ✅ Circuit breaker per agent (CLOSED/OPEN/HALF_OPEN state machine)    │
+  │  ✅ Token budget manager (per-minute, sliding window)                   │
+  │  ✅ Per-user rate limiter + Bulkhead semaphore (max concurrent)        │
+  │  ✅ LLM-as-judge evaluation framework (6 evaluators)                   │
+  │  ✅ Agent/tool registry with capability discovery + health routing      │
+  │  ✅ CritiqueAgent (Reflexion pattern: Generate→Critique→Revise→loop)   │
   └─────────────────────────────────────────────────────────────────────────┘
 
 Run
 ───
   python main.py                         # full demo (all features)
   python main.py --deep-agent            # Deep Agents checklist demo
+  python main.py --harness               # Agent Harness kitchen-sink demo
   python main.py --scenario anomaly      # single scenario
   python main.py --supervisor            # multi-agent supervisor demo
   python main.py --rag                   # RAG chain demo
@@ -95,7 +109,8 @@ from rich.panel import Panel
 from rich.rule import Rule
 from rich.table import Table
 
-from month_end_assistant.agents import build_month_end_graph, DeepAgent
+from month_end_assistant.agents import build_month_end_graph, DeepAgent, CritiqueAgent
+from month_end_assistant.harness import AgentHarness, HarnessSettings
 from month_end_assistant.agents.scenarios import SCENARIO_REGISTRY, run_scenario
 from month_end_assistant.filesystem import (
     FilePermissions, InMemoryBackend, SandboxBackend, LocalDiskBackend,
@@ -420,6 +435,123 @@ async def demo_deep_agent(period: MonthEndPeriod) -> None:
     console.print("\n  [bold green]✅ All Deep Agents checklist items demonstrated![/bold green]\n")
 
 
+async def demo_harness(period: MonthEndPeriod) -> None:
+    """
+    Agent Harness kitchen-sink demo — showcases every harness feature.
+
+    Walks through:
+      1. Harness bootstrap + registry status
+      2. Circuit breaker: status probe + simulated failure/recovery
+      3. Token budget: remaining capacity check
+      4. Bulkhead: available slot count
+      5. Cross-thread memory store: save + search
+      6. CritiqueAgent (Reflexion): generate → critique → revise loop
+      7. Evaluation framework: add cases + run + report
+      8. Streaming events: subscribe + consume
+      9. Capability discovery: query registry for best agent
+    """
+    _section("Agent Harness — Kitchen-Sink Demo")
+
+    # ── 1. Bootstrap ──────────────────────────────────────────────────────────
+    console.print("  [yellow]1.[/yellow] Bootstrapping harness (sync mode)…")
+    harness = AgentHarness(HarnessSettings(
+        checkpoint_backend="memory",   # no SQLite dependency needed for demo
+        prometheus_enabled=False,      # skip metrics server in demo
+        langsmith_tracing=False,
+    ))
+    harness.initialize_sync()
+    console.print(f"     Agents registered: {harness.registry.list_agents()}")
+
+    # ── 2. Circuit breaker ────────────────────────────────────────────────────
+    console.print("\n  [yellow]2.[/yellow] Circuit Breaker (CLOSED → OPEN → HALF_OPEN → CLOSED)")
+    cb = harness.circuit_breaker
+    cb.before_call("orchestrator")                        # OK: CLOSED
+    console.print(f"     State after probe: {cb.status()}")
+    for i in range(5):                                    # Simulate 5 failures → OPEN
+        cb.on_failure("orchestrator")
+    try:
+        cb.before_call("orchestrator")
+    except Exception as exc:
+        console.print(f"     After 5 failures → [red]CircuitOpenError[/red]: {exc}")
+    cb.on_success("orchestrator")                         # Reset manually
+    console.print(f"     After reset: {cb.status()}")
+
+    # ── 3. Token budget ───────────────────────────────────────────────────────
+    console.print("\n  [yellow]3.[/yellow] Token Budget Manager (100K tpm sliding window)")
+    budget = harness.token_budget
+    console.print(f"     Remaining capacity: {budget.remaining:,} tokens")
+    await budget.consume(1_500)
+    console.print(f"     After consuming 1,500: {budget.remaining:,} tokens remaining")
+
+    # ── 4. Bulkhead ───────────────────────────────────────────────────────────
+    console.print("\n  [yellow]4.[/yellow] Bulkhead Semaphore (max concurrent runs)")
+    bh = harness._bulkhead
+    console.print(f"     Max concurrent: {bh._max}  |  Active: {bh.current_runs}  |  Free slots: {bh.available_slots}")
+
+    # ── 5. Cross-thread memory ────────────────────────────────────────────────
+    console.print("\n  [yellow]5.[/yellow] Cross-Thread Long-Term Memory (LangGraph Store API)")
+    mem = harness.memory
+    await mem.save_user_memory("alice", "run-001", {
+        "summary": "Revenue recognition analysis for Q3 2025 — IFRS 15 compliant",
+        "period":  "2025-09",
+    })
+    await mem.save_user_memory("alice", "run-002", {
+        "summary": "Cash flow forecast shows positive trend despite AP ageing concerns",
+        "period":  "2025-09",
+    })
+    hits = await mem.search_user_memories("alice", query="revenue IFRS", limit=5)
+    console.print(f"     Saved 2 memories.  Search 'revenue IFRS' → {len(hits)} hit(s)")
+    for h in hits:
+        console.print(f"     [dim]• {h.value.get('summary', '')[:80]}[/dim]")
+
+    # ── 6. CritiqueAgent (Reflexion loop) ─────────────────────────────────────
+    console.print("\n  [yellow]6.[/yellow] CritiqueAgent — Reflexion pattern (Generate → Critique → Revise)")
+    critique_agent = CritiqueAgent(max_rounds=2, quality_threshold=0.70)
+    console.print(f"     Graph nodes: generate → critique → revise (×N) → save → END")
+    try:
+        output = await critique_agent.run(
+            content=f"Analyse the revenue performance for {period.label}.",
+            criteria=["IFRS 15 compliance", "quantitative support", "actionability"],
+            period=period.label,
+            user_id="alice",
+        )
+        rounds = output.get("round", "?")
+        score  = (output.get("final_critique") or {}).get("overall_score", "?")
+        revised_preview = str(output.get("revised_content", ""))[:200]
+        console.print(f"     Rounds: {rounds}  |  Final score: {score}")
+        console.print(f"     Revised (preview): {revised_preview}…")
+    except Exception as exc:
+        console.print(f"     [dim]stub mode: {exc}[/dim]")
+
+    # ── 7. Evaluation framework ───────────────────────────────────────────────
+    console.print("\n  [yellow]7.[/yellow] LLM-as-Judge Evaluation Framework (6 evaluators)")
+    report = await harness.evaluate(dataset=None, evaluators=["keyword_presence"])
+    console.print(report.summary())
+
+    # ── 8. Streaming events ───────────────────────────────────────────────────
+    console.print("\n  [yellow]8.[/yellow] astream_events Multi-Consumer Fan-Out")
+    from month_end_assistant.harness.streaming import HarnessStreamingManager, HarnessEvent
+    streaming = HarnessStreamingManager()
+    console.print("     Subscribers can call streaming.subscribe(run_id) to receive events.")
+    console.print("     Events: on_llm_stream → HarnessEvent(type='token', data={'token': '...'})")
+    console.print("     format: event.to_sse()  /  event.to_openai_delta()")
+
+    # ── 9. Capability discovery ───────────────────────────────────────────────
+    console.print("\n  [yellow]9.[/yellow] Agent Registry — Capability Discovery")
+    caps = harness.registry.discover("revenue analysis")
+    console.print(f"     Query 'revenue analysis' → {len(caps)} capable agent(s):")
+    for cap in caps:
+        console.print(f"       [cyan]{cap.name}[/cyan]: health={cap.health_score():.2f}  tags={cap.tags}")
+    best = harness.registry.select_best("sandbox code execution")
+    if best:
+        _, best_cap = best
+        console.print(f"     Best for 'sandbox code execution': [cyan]{best_cap.name}[/cyan]")
+
+    console.print(f"\n  [bold green]✅ Agent Harness demo complete![/bold green]\n")
+    console.print(harness.registry.status_report())
+    console.print(f"\n  Harness status: {harness.status()}\n")
+
+
 async def demo_full_pipeline(
     period: MonthEndPeriod,
     user_id: str,
@@ -500,6 +632,7 @@ async def run_demo(
     run_rag:        bool = False,
     run_super:      bool = False,
     run_deep_agent: bool = False,
+    run_harness:    bool = False,
     run_server:     bool = False,
     interactive:    bool = False,
 ) -> None:
@@ -530,11 +663,15 @@ async def run_demo(
     if run_deep_agent:
         await demo_deep_agent(period)
 
+    if run_harness:
+        await demo_harness(period)
+
     if scenario:
         await demo_scenarios(period, scenario)
-    elif not run_lcel and not run_rag and not run_super and not run_deep_agent:
+    elif not run_lcel and not run_rag and not run_super and not run_deep_agent and not run_harness:
         # Run everything
-        await demo_deep_agent(period)      # Deep Agents first (checklist showcase)
+        await demo_harness(period)         # Harness first
+        await demo_deep_agent(period)
         await demo_lcel_chains(period)
         await demo_rag_chain()
         await demo_scenarios(period)
@@ -564,6 +701,8 @@ if __name__ == "__main__":
     p.add_argument("--lcel",        action="store_true", help="Run LCEL chains showcase only")
     p.add_argument("--rag",         action="store_true", help="Run RAG demo only")
     p.add_argument("--supervisor",  action="store_true", help="Run supervisor demo only")
+    p.add_argument("--deep-agent",  action="store_true", dest="deep_agent", help="Run Deep Agents checklist demo")
+    p.add_argument("--harness",     action="store_true", help="Run Agent Harness kitchen-sink demo")
     p.add_argument("--server",      action="store_true", help="Start FastAPI + OpenWebUI backend")
     p.add_argument("--interactive", action="store_true", help="Real HITL (prompt for approval)")
     args = p.parse_args()
@@ -577,6 +716,8 @@ if __name__ == "__main__":
         run_lcel=args.lcel,
         run_rag=args.rag,
         run_super=args.supervisor,
+        run_deep_agent=args.deep_agent,
+        run_harness=args.harness,
         run_server=args.server,
         interactive=args.interactive,
     ))

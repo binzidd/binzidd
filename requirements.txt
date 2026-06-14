@@ -45,6 +45,21 @@ streamlit>=1.38.0
 requests>=2.32.0
 bcrypt>=4.2.0                   # Password hashing for Streamlit auth
 
+# ── Agent Harness: persistent checkpointing ───────────────────────────────────
+langgraph-checkpoint-sqlite>=2.0.0   # AsyncSqliteSaver for durable state
+# langgraph-checkpoint-postgres>=2.0.0 # Uncomment for team-shared Postgres backend
+
+# ── Agent Harness: observability ─────────────────────────────────────────────
+opentelemetry-api>=1.27.0
+opentelemetry-sdk>=1.27.0
+opentelemetry-exporter-otlp-proto-grpc>=1.27.0  # OTLP/gRPC export (Jaeger, Grafana Tempo)
+opentelemetry-instrumentation-fastapi>=0.48b0    # Auto-instrument FastAPI
+prometheus-client>=0.21.0           # /metrics endpoint
+structlog>=24.4.0                   # Structured JSON logging with contextvars
+
+# ── Agent Harness: evaluation ─────────────────────────────────────────────────
+langsmith>=0.1.100                  # LangSmith tracing + dataset management
+
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest>=8.3.0
 pytest-asyncio>=0.24.0

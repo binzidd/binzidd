@@ -3,6 +3,7 @@ from .research     import DeepResearchAgent
 from .orchestrator import build_month_end_graph
 from .deep_agent   import DeepAgent
 from .supervisor   import MonthEndSupervisor
+from .critique     import CritiqueAgent
 
 __all__ = [
     "BaseAgent",
@@ -10,4 +11,5 @@ __all__ = [
     "build_month_end_graph",
     "DeepAgent",
     "MonthEndSupervisor",
+    "CritiqueAgent",
 ]
